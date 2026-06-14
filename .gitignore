@@ -1,0 +1,12 @@
+# segreti / credenziali — MAI su GitHub
+config.json
+credentials.json
+token.json
+*.secret
+
+# artefatti di debug / output
+sample_*.html
+annunci_*.txt
+*.log
+__pycache__/
+*.pyc
