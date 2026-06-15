@@ -211,13 +211,36 @@ def zona_ok(addr, title):
     return bool(ZONE_RE.search(blob))
 
 
-def classifica(item):
-    blob = " ".join([item["title"], item["addr"], item["desc"]])
-    if RIFIUTO.search(blob):
-        return "scartato_rifiuto"
-    if FAVORE.search(blob):
-        return "favorevole"
-    return "neutro"
+def fetch_detail(url):
+    """Apre la pagina dell'annuncio e ne estrae il TESTO completo (per leggere la
+    descrizione vera, dove sta l'eventuale 'no uso ricettivo'). None se la fonte blocca."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "lxml")
+        for t in soup(["script", "style", "noscript"]):
+            t.extract()
+        return soup.get_text(" ", strip=True).lower()
+    except Exception:
+        return None
+
+
+def private_signal(text):
+    """Euristica privato vs agenzia dal testo dell'annuncio."""
+    if not text:
+        return "?"
+    has_ag = bool(re.search(r"agenzia|immobiliare s\.?r\.?l|real estate|gruppo immobiliar|"
+                            r"rif\.?\s*agenzia", text))
+    has_priv = bool(re.search(r"\bprivato\b|da privato|annuncio di un privato|no agenzie|"
+                              r"niente agenzie|nessuna agenzia", text))
+    if has_priv and not has_ag:
+        return "privato"
+    if has_priv and has_ag:
+        return "privato?"
+    if has_ag:
+        return "agenzia"
+    return "?"
 
 
 def main():
@@ -253,7 +276,7 @@ def main():
     allcards = {c["key"]: c for c in raw}.values()
 
     tot = len(allcards)
-    keep, scartati_tipo, scartati_zona, scartati_prezzo, scartati_rifiuto = [], 0, 0, 0, 0
+    cand, scartati_tipo, scartati_zona, scartati_prezzo, scartati_rifiuto = [], 0, 0, 0, 0
     for c in allcards:
         if not tipo_ok(c["title"]):
             scartati_tipo += 1; continue
@@ -261,13 +284,32 @@ def main():
             scartati_zona += 1; continue
         if c["price"] is not None and c["price"] > MAX_PREZZO:
             scartati_prezzo += 1; continue
-        cls = classifica(c)
-        if cls == "scartato_rifiuto":
+        if RIFIUTO.search(" ".join([c["title"], c["addr"], c["desc"]])):  # rifiuto gia' nella card
             scartati_rifiuto += 1; continue
-        c["classe"] = cls
-        keep.append(c)
+        cand.append(c)
 
-    nuovi = [c for c in keep if c["key"] not in seen]
+    # Verifica la DESCRIZIONE COMPLETA solo per i candidati NUOVI: apre l'annuncio,
+    # legge il testo e SCARTA chi rifiuta l'uso ricettivo. Tagga privato/agenzia.
+    nuovi_cand = [c for c in cand if c["key"] not in seen]
+    keep, scartati_rifiuto_desc, non_verif = [], 0, 0
+    for c in nuovi_cand:
+        detail = fetch_detail(c["link"])
+        full = " ".join([c["title"], c["addr"], c["desc"], detail or ""])
+        if detail and RIFIUTO.search(full):
+            scartati_rifiuto_desc += 1
+            continue   # rifiuta l'uso ricettivo nella descrizione -> fuori
+        c["classe"] = "favorevole" if FAVORE.search(full) else "neutro"
+        c["fonte_tipo"] = private_signal(detail)
+        c["verificato"] = detail is not None
+        if not detail:
+            non_verif += 1
+        keep.append(c)
+        time.sleep(0.6)
+
+    # ordina: favorevoli prima, poi i piu' "privati" prima
+    keep.sort(key=lambda c: (0 if c["classe"] == "favorevole" else 1,
+                             0 if c["fonte_tipo"].startswith("privato") else 1))
+    nuovi = keep
     favorevoli = [c for c in nuovi if c["classe"] == "favorevole"]
     neutri = [c for c in nuovi if c["classe"] == "neutro"]
 
@@ -277,18 +319,21 @@ def main():
     log(f"  scartati tipo (no appartamento): {scartati_tipo}")
     log(f"  scartati zona (fuori centro):    {scartati_zona}")
     log(f"  scartati prezzo (> {MAX_PREZZO}):     {scartati_prezzo}")
-    log(f"  scartati rifiuto uso ricettivo:  {scartati_rifiuto}")
-    log(f"  IN TARGET: {len(keep)}  (gia visti: {len(keep)-len(nuovi)}, NUOVI: {len(nuovi)})")
-    log(f"  di cui favorevoli: {len(favorevoli)}, neutri: {len(neutri)}")
+    log(f"  scartati rifiuto (gia nella card): {scartati_rifiuto}")
+    log(f"  candidati in target: {len(cand)} (nuovi da verificare: {len(nuovi_cand)})")
+    log(f"  scartati rifiuto (in descrizione): {scartati_rifiuto_desc}")
+    log(f"  INVIATI: {len(nuovi)} (favorevoli {len(favorevoli)}, neutri {len(neutri)}, non verificati {non_verif})")
 
     # output file digest
     out_lines = [f"# Annunci affitto Roma centro — {date.today()}",
-                 f"# NUOVI in target: {len(nuovi)} (favorevoli {len(favorevoli)}, neutri {len(neutri)})\n"]
+                 f"# Nuovi in target: {len(nuovi)} (favorevoli {len(favorevoli)}, neutri {len(neutri)})",
+                 "# Tag: [privato/agenzia/?] + stato verifica descrizione.\n"]
     for sezione, lst in [("FAVOREVOLI (uso ricettivo ok)", favorevoli), ("NEUTRI (da verificare)", neutri)]:
         out_lines.append(f"\n## {sezione}")
         for c in lst:
             price = f"€{c['price']}" if c["price"] else "€?"
-            out_lines.append(f"- {c['title'][:60]} | {price} | {c['addr'][:35]}\n  {c['link']}")
+            ver = "descrizione OK" if c.get("verificato") else "⚠️ descrizione NON verificata (apri il link)"
+            out_lines.append(f"- {c['title'][:60]} | {price} | {c['addr'][:35]} | [{c.get('fonte_tipo','?')}] [{ver}]\n  {c['link']}")
     outfile = BASE / f"annunci_{date.today()}.txt"
     outfile.write_text("\n".join(out_lines), encoding="utf-8")
     log(f"\nDigest scritto in: {outfile.name}")
@@ -300,8 +345,9 @@ def main():
     else:
         log("Nessun nuovo annuncio: niente email.")
 
-    # aggiorna seen con TUTTI i target visti
-    seen.update(c["key"] for c in keep)
+    # aggiorna seen con TUTTI i candidati in target (anche gli scartati per rifiuto in
+    # descrizione, cosi' non li riapriamo/rinviamo)
+    seen.update(c["key"] for c in cand)
     save_seen(seen)
 
 

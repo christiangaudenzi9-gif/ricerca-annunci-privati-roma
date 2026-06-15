@@ -61,3 +61,8 @@ bilo/trilocale, max 1800, "solo privati" dove c'e') + notifiche push ON.
 - 14/06: pivot Via C (filtro su rifiuto uso ricettivo invece di privato/agenzia).
 - 14/06: scraper.py Nuroa VALIDATO (3 annunci centro storico, link puliti). Email/cloud da fare.
 - 14/06: aggiunto parser TROVIT (multi-fonte). Ora 4 annunci centro (Esquilino x2, Centro storico, Prati/Municipio I). TODO: verificare paginazione Trovit (?page ripete pag1?), pulire link clk.thribee. git NON installato.
+- 15/06: git installato + repo PUSHATO su github.com/christiangaudenzi9-gif/ricerca-annunci-privati-roma.
+- 15/06: aggiunto INVIO EMAIL SMTP (smtp.gmail.com:465). Creds da env (cloud) o config.json (locale, gitignored). Mittente+dest = chriash22@gmail.com (Gmail lavoro condiviso, app password). TEST LOCALE OK: email inviata (4 annunci).
+- 15/06: creata ROUTINE CLOUD `trig_01UEi4h34Z9SmQBx6cxQAEn6` (daily 06:00 UTC = 08:00 Roma): esegue scraper che invia da solo via SMTP a chriash22 (creds passate via export nel prompt routine — privato). Gmail MCP rimosso (faceva solo bozze).
+- ⏳ BLOCCO: il test cloud da `github_repo_access_denied` → Christian deve autorizzare GitHub su claude.ai (o rendere il repo pubblico). Poi rilanciare il test.
+- NOTA: app password chriash22 vive in config.json locale (gitignored) E nel prompt della routine (account privato). Se la cambi, aggiorna entrambi.
