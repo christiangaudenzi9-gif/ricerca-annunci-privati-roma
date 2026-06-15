@@ -197,6 +197,34 @@ def parse_trovit(html):
     return list(uniq.values())
 
 
+def parse_casa(html):
+    """Estrae le card da Casa.it (a.csaSrpcard__det__title--a)."""
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for a in soup.select("a.csaSrpcard__det__title--a"):
+        title = a.get_text(" ", strip=True)
+        href = a.get("href", "")
+        if href.startswith("/"):
+            href = "https://www.casa.it" + href
+        card = a
+        for _ in range(8):
+            card = card.find_parent() if card else None
+            if card and card.select_one(".csaSrpcard__det__feats--price"):
+                break
+        price_el = card.select_one(".csaSrpcard__det__feats--price") if card else None
+        ptxt = price_el.get_text(" ", strip=True) if price_el else ""
+        pm = re.search(r"(\d[\d.]*)", ptxt)
+        price = int(pm.group(1).replace(".", "")) if pm else None
+        loc_el = card.select_one(".location") if card else None
+        addr = loc_el.get_text(" ", strip=True) if loc_el else ""
+        m = re.search(r"/immobili/(\d+)", href)
+        key = "casa-" + m.group(1) if m else re.sub(r"\W+", "", (title + str(price)))[:40]
+        out.append({"key": key, "title": title or addr, "price": price, "addr": addr,
+                    "desc": title, "link": href})
+    uniq = {d["key"]: d for d in out}
+    return list(uniq.values())
+
+
 def tipo_ok(title):
     t = title.lower()
     if any(x in t for x in TIPI_NO):
@@ -253,6 +281,10 @@ def main():
         {"name": "trovit",
          "url": "https://casa.trovit.it/affitto-roma",
          "parser": parse_trovit, "pages": 3,  # TODO verificare param paginazione
+         "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
+        {"name": "casa.it",
+         "url": "https://www.casa.it/affitto/residenziale/roma/",
+         "parser": parse_casa, "pages": 4,
          "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
     ]
     raw = []
