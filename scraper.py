@@ -11,10 +11,13 @@ Dedup persistente su seen.json (solo NUOVI annunci a ogni run).
 Output: file digest datato + riepilogo a schermo. (Email: TODO con password-app Gmail.)
 """
 import json
+import os
 import re
+import smtplib
 import sys
 import time
 from datetime import date
+from email.message import EmailMessage
 from pathlib import Path
 
 import requests
@@ -89,6 +92,35 @@ def load_seen():
 
 def save_seen(seen):
     SEEN_FILE.write_text(json.dumps(sorted(seen)), encoding="utf-8")
+
+
+def email_cfg():
+    """Credenziali email da env (cloud) o da config.json locale (gitignored)."""
+    cfg = {}
+    cfgfile = BASE / "config.json"
+    if cfgfile.exists():
+        cfg = json.loads(cfgfile.read_text(encoding="utf-8"))
+    user = os.environ.get("GMAIL_USER") or cfg.get("gmail_user")
+    pwd = os.environ.get("GMAIL_PASS") or cfg.get("gmail_pass")
+    to = os.environ.get("MAIL_TO") or cfg.get("mail_to") or user
+    return user, pwd, to
+
+
+def send_email(subject, body):
+    user, pwd, to = email_cfg()
+    if not (user and pwd):
+        log("Email non configurata (manca GMAIL_USER/GMAIL_PASS) -> salto invio.")
+        return False
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(user, pwd.replace(" ", ""))
+        s.send_message(msg)
+    log(f"Email inviata a {to}")
+    return True
 
 
 def fetch(url):
@@ -260,6 +292,13 @@ def main():
     outfile = BASE / f"annunci_{date.today()}.txt"
     outfile.write_text("\n".join(out_lines), encoding="utf-8")
     log(f"\nDigest scritto in: {outfile.name}")
+
+    # invio email (solo se ci sono annunci nuovi)
+    if nuovi:
+        send_email(f"Annunci casa Roma centro — {date.today()} ({len(nuovi)} nuovi)",
+                   "\n".join(out_lines))
+    else:
+        log("Nessun nuovo annuncio: niente email.")
 
     # aggiorna seen con TUTTI i target visti
     seen.update(c["key"] for c in keep)
