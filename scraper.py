@@ -1,14 +1,17 @@
 """
-Scraper Via C — annunci affitto Roma centro dagli aggregatori (Nuroa).
+Scraper Via C — annunci affitto Roma centro dagli aggregatori (Nuroa/Trovit/Casa.it).
 NON filtra agenzia/privato. Filtra:
   - tipo: appartamenti (esclude negozi, uffici, box, garage, stanze...)
-  - zona: centro storico (lista target)
+  - zona: PRIMI 10 RIONI (R.I–R.X) + TRASTEVERE. Esclusi Prati/Vaticano, Esquilino,
+    Celio, Aventino, Testaccio e periferia. Classificazione a 3 esiti (in/fuori/forse);
+    i "forse" entrano solo se il DETTAGLIO conferma il target (rione/landmark/CAP).
   - prezzo: <= MAX_PREZZO
   - uso ricettivo: SCARTA chi lo rifiuta (no affitti brevi / solo uso abitativo...)
     e mette in cima chi lo favorisce (uso transitorio, foresteria, investimento...)
 
 Dedup persistente su seen.json (solo NUOVI annunci a ogni run).
-Output: file digest datato + riepilogo a schermo. (Email: TODO con password-app Gmail.)
+Email inviata SEMPRE (anche 0 nuovi: fa da battito + segnala se i siti bloccano).
+Output: file digest datato + riepilogo a schermo.
 """
 import json
 import os
@@ -29,18 +32,62 @@ BASE = Path(__file__).resolve().parent
 
 # ----------------------------- CONFIG ------------------------------------- #
 MAX_PREZZO = 1800
-# zona centro storico: match preciso. "prati" esclude "Prati Fiscali"; "monti"
-# esclude "Monti Tiburtini" (zone diverse, fuori centro).
-ZONE_RE = re.compile(
-    r"\b(esquilino|celio|colle\s+oppio|trastevere|centro\s+storico)\b"
-    r"|\bprati\b(?!\s*fiscal)"
-    r"|\bmonti\b(?!\s*tiburtin)", re.I)
-# zone periferiche: se presenti, l'annuncio NON e' centro storico (gli aggregatori
-# elencano cluster di macrozone, es. "nuovo salario, prati fiscali, monte sacro...")
+
+# ----------------------------- ZONA --------------------------------------- #
+# Target = i PRIMI 10 RIONI di Roma (R.I–R.X) + TRASTEVERE (R.XIII).
+# NON inclusi (richiesta Christian 16/06): Prati/Vaticano/Borgo, Esquilino,
+# Celio, Colle Oppio, Aventino, Testaccio, e tutta la periferia.
+#
+# Strategia: la card spesso non nomina il rione (solo "Roma" o una via). Quindi
+# classifichiamo con tre esiti — "in" (zona target sicura), "fuori" (zona esclusa
+# sicura), "forse" (ignota) — e per i "forse" apriamo il dettaglio (dove c'e'
+# l'indirizzo completo + CAP) prima di decidere.
+
+# --- TARGET: nomi rione + vie/piazze/landmark caratteristici dei 10 rioni + Trastevere
+ZONE_TARGET = re.compile(
+    r"\bcentro\s+storico\b|"
+    # rioni
+    r"\b(trastevere|campo\s+marzio|sant'?\s?eustachio|s\.?\s?eustachio|"
+    r"campitelli|parione|regola|pigna|colonna|trevi)\b|"
+    r"\brione\s+monti\b|\bmonti\b(?!\s*(tiburtin|sacro|parioli))|\bponte\b(?!\s*(mammolo|galeria|milvio))|"
+    # landmark / vie / piazze centrali
+    r"pantheon|piazza\s+navona|campo\s+de'?\s?fiori|fontana\s+di\s+trevi|"
+    r"piazza\s+di\s+spagna|piazza\s+del\s+popolo|piazza\s+venezia|piazza\s+colonna|"
+    r"piazza\s+farnese|piazza\s+della\s+rotonda|largo\s+(di\s+torre\s+)?argentina|"
+    r"fori\s+imperiali|foro\s+romano|campidoglio|teatro\s+di\s+marcello|"
+    r"trinit[aà]\s+dei\s+monti|montecitorio|quirinale|"
+    r"via\s+del\s+corso|via\s+condotti|via\s+frattina|via\s+borgognona|via\s+del\s+babuino|"
+    r"via\s+margutta|via\s+di\s+ripetta|via\s+della\s+scrofa|via\s+giulia|via\s+dei\s+coronari|"
+    r"via\s+del\s+governo\s+vecchio|via\s+dei\s+giubbonari|via\s+monserrato|via\s+arenula|"
+    r"via\s+cavour|via\s+nazionale|via\s+panisperna|via\s+dei\s+serpenti|via\s+urbana|"
+    r"via\s+del\s+tritone|via\s+due\s+macelli|via\s+del\s+plebiscito|via\s+delle\s+botteghe\s+oscure|"
+    r"piazza\s+santa\s+maria\s+in\s+trastevere|viale\s+(di\s+)?trastevere|piazza\s+trilussa|"
+    r"via\s+della\s+lungaretta|via\s+di\s+san\s+francesco\s+a\s+ripa|ponte\s+sisto",
+    re.I)
+
+# --- CAP centrali (rete di sicurezza, cercata nel dettaglio completo) ---
+# 00184 Monti · 00186 Ponte/Parione/Regola/S.Eustachio/Pigna/Campitelli ·
+# 00187 Trevi/Colonna/Campo Marzio · 00153 Trastevere
+ZONE_CAP = re.compile(r"\b(00184|00186|00187|00153)\b")
+
+# --- ESCLUSE: periferia + zone centrali-ma-fuori-target (Vaticano/Prati, Esquilino...)
 ZONE_EXCLUDE = re.compile(
-    r"prati fiscal|monte sacro|monti tiburtin|nuovo salario|talenti|vigne nuove|"
-    r"serpentara|montagnola|casalotti|portuens|magliana|infernetto|axa|"
-    r"bufalotta|fidene|tor ", re.I)
+    # Vaticano / Prati / Borgo (la segnalazione "lontana" del 16/06)
+    r"\bprati\b|prati\s+degli\s+strozzi|vaticano|\bborgo\b|ottaviano|cipro|lepanto|"
+    r"cola\s+di\s+rienzo|della\s+vittoria|delle\s+vittorie|piazza\s+delle\s+muse|"
+    # rioni/quartieri centrali ma esclusi dalla richiesta
+    r"esquilino|vittorio\s+emanuele|termini|celio|colle\s+oppio|aventino|testaccio|"
+    r"san\s+lorenzo|san\s+giovanni|s\.?\s?giovanni|appio|"
+    # macrozone periferiche
+    r"prati\s+fiscal|monte\s+sacro|monti\s+tiburtin|nuovo\s+salario|talenti|vigne\s+nuove|"
+    r"serpentara|montagnola|casalotti|portuens|magliana|infernetto|\baxa\b|"
+    r"bufalotta|fidene|\btor\s|parioli|pinciano|trieste|salario|nomentan|"
+    r"tuscolan|tiburtin|pietralata|collatino|centocelle|prenestin|casilin|"
+    r"eur\b|laurentin|spinaceto|trigoria|acilia|ostia|vitinia|giustiniana|olgiata|"
+    r"casal|torrenova|tor\s+tre\s+teste|bravetta|pisana|garbatella|ardeatin|"
+    # Trovit: "Municipio Roma <N>" — solo il I e' il centro storico; II–XV = fuori
+    r"municipio\s+roma\s+(ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|xiii|xiv|xv)\b",
+    re.I)
 # tipi da TENERE (l'annuncio inizia di solito con la tipologia)
 TIPI_OK = ["appartament", "casa", "attico", "bilocale", "trilocale", "monolocale",
            "quadrilocale", "loft", "mansarda"]
@@ -232,11 +279,20 @@ def tipo_ok(title):
     return any(x in t for x in TIPI_OK)
 
 
-def zona_ok(addr, title):
-    blob = addr + " " + title
-    if ZONE_EXCLUDE.search(blob):
-        return False
-    return bool(ZONE_RE.search(blob))
+def zona_classifica(text):
+    """Classifica un testo (card o dettaglio) rispetto al target geografico:
+      'fuori' -> zona esclusa certa (periferia / Vaticano-Prati / Esquilino...)
+      'in'    -> primi 10 rioni o Trastevere (rione, landmark o CAP centrale)
+      'forse' -> nessun segnale: zona ignota, va verificata nel dettaglio.
+    L'esclusione vince sull'inclusione (se un annuncio nomina sia un landmark
+    centrale sia una macrozona periferica, meglio scartarlo)."""
+    if not text:
+        return "forse"
+    if ZONE_EXCLUDE.search(text):
+        return "fuori"
+    if ZONE_TARGET.search(text) or ZONE_CAP.search(text):
+        return "in"
+    return "forse"
 
 
 def fetch_detail(url):
@@ -288,48 +344,68 @@ def main():
          "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
     ]
     raw = []
+    fonti_stat = []   # (nome, n_card, nota) per il report/email — rende visibile un blocco
     for s in SOURCES:
         log(f"[{s['name']}]")
+        n_src, nota = 0, "ok"
         for p in range(1, s["pages"] + 1):
             url = s["pagefmt"](s["url"], p)
             try:
                 html = fetch(url)
             except Exception as e:
                 log(f"  pag {p}: errore {type(e).__name__}")
+                nota = f"errore {type(e).__name__} a pag {p}"
                 break
             cards = s["parser"](html)
             log(f"  {url} -> {len(cards)} card")
             if not cards:
+                if p == 1:
+                    nota = "0 card a pag 1 (parser rotto o sito che blocca?)"
                 break
             raw.extend(cards)
+            n_src += len(cards)
             time.sleep(1.5)
+        fonti_stat.append((s["name"], n_src, nota))
 
     # dedup globale
-    allcards = {c["key"]: c for c in raw}.values()
+    allcards = list({c["key"]: c for c in raw}.values())
 
     tot = len(allcards)
+    # filtro card: tipo -> prezzo -> zona (3 esiti) -> rifiuto gia' nella card
     cand, scartati_tipo, scartati_zona, scartati_prezzo, scartati_rifiuto = [], 0, 0, 0, 0
     for c in allcards:
         if not tipo_ok(c["title"]):
             scartati_tipo += 1; continue
-        if not zona_ok(c["addr"], c["title"]):
-            scartati_zona += 1; continue
         if c["price"] is not None and c["price"] > MAX_PREZZO:
             scartati_prezzo += 1; continue
-        if RIFIUTO.search(" ".join([c["title"], c["addr"], c["desc"]])):  # rifiuto gia' nella card
+        z = zona_classifica(" ".join([c["addr"], c["title"], c["desc"]]))
+        if z == "fuori":
+            scartati_zona += 1; continue
+        if RIFIUTO.search(" ".join([c["title"], c["addr"], c["desc"]])):
             scartati_rifiuto += 1; continue
+        c["zona_card"] = z   # "in" o "forse"
         cand.append(c)
 
     # Verifica la DESCRIZIONE COMPLETA solo per i candidati NUOVI: apre l'annuncio,
-    # legge il testo e SCARTA chi rifiuta l'uso ricettivo. Tagga privato/agenzia.
+    # legge il testo, ri-classifica la zona (CAP/indirizzo completo), scarta chi
+    # rifiuta l'uso ricettivo o e' fuori target, tagga privato/agenzia.
     nuovi_cand = [c for c in cand if c["key"] not in seen]
-    keep, scartati_rifiuto_desc, non_verif = [], 0, 0
+    keep, scartati_rifiuto_desc, scartati_zona_desc, non_verif = [], 0, 0, 0
     for c in nuovi_cand:
         detail = fetch_detail(c["link"])
         full = " ".join([c["title"], c["addr"], c["desc"], detail or ""])
         if detail and RIFIUTO.search(full):
             scartati_rifiuto_desc += 1
-            continue   # rifiuta l'uso ricettivo nella descrizione -> fuori
+            continue   # rifiuta l'uso ricettivo -> fuori
+        # zona: card "in" basta; card "forse" entra SOLO se il dettaglio CONFERMA
+        # il target (rione/landmark/CAP). Conferma solo positiva: niente esclusioni
+        # sul dettaglio (evita falsi scarti tipo "a 5 min da Termini") e niente
+        # calderone "da verificare" (sarebbe rumore: idealista blocca il dettaglio).
+        if c["zona_card"] != "in":
+            if not (detail and zona_classifica(detail) == "in"):
+                scartati_zona_desc += 1
+                continue
+        c["zona_finale"] = "in"
         c["classe"] = "favorevole" if FAVORE.search(full) else "neutro"
         c["fonte_tipo"] = private_signal(detail)
         c["verificato"] = detail is not None
@@ -338,47 +414,71 @@ def main():
         keep.append(c)
         time.sleep(0.6)
 
-    # ordina: favorevoli prima, poi i piu' "privati" prima
+    # ordina: favorevoli prima, poi i piu' "privati"
     keep.sort(key=lambda c: (0 if c["classe"] == "favorevole" else 1,
                              0 if c["fonte_tipo"].startswith("privato") else 1))
-    nuovi = keep
-    favorevoli = [c for c in nuovi if c["classe"] == "favorevole"]
-    neutri = [c for c in nuovi if c["classe"] == "neutro"]
+    nuovi = keep   # tutti zona_finale == "in": primi 10 rioni + Trastevere
+    fav = [c for c in nuovi if c["classe"] == "favorevole"]
+    neu = [c for c in nuovi if c["classe"] == "neutro"]
 
-    # report
+    # report a schermo
     log("\n===== RIEPILOGO =====")
     log(f"card totali (dedup): {tot}")
+    for nome, n, nota in fonti_stat:
+        log(f"  fonte {nome}: {n} card ({nota})")
     log(f"  scartati tipo (no appartamento): {scartati_tipo}")
-    log(f"  scartati zona (fuori centro):    {scartati_zona}")
-    log(f"  scartati prezzo (> {MAX_PREZZO}):     {scartati_prezzo}")
-    log(f"  scartati rifiuto (gia nella card): {scartati_rifiuto}")
-    log(f"  candidati in target: {len(cand)} (nuovi da verificare: {len(nuovi_cand)})")
-    log(f"  scartati rifiuto (in descrizione): {scartati_rifiuto_desc}")
-    log(f"  INVIATI: {len(nuovi)} (favorevoli {len(favorevoli)}, neutri {len(neutri)}, non verificati {non_verif})")
+    log(f"  scartati prezzo (> {MAX_PREZZO}): {scartati_prezzo}")
+    log(f"  scartati zona card (fuori target): {scartati_zona}")
+    log(f"  scartati zona da dettaglio: {scartati_zona_desc}")
+    log(f"  scartati rifiuto ricettivo: {scartati_rifiuto + scartati_rifiuto_desc}")
+    log(f"  candidati: {len(cand)} (nuovi verificati: {len(nuovi_cand)})")
+    log(f"  TENUTI (centro confermato): {len(nuovi)} (fav {len(fav)}, neu {len(neu)})")
 
-    # output file digest
+    # --- costruzione corpo email/digest (SEMPRE, anche con 0 nuovi) ---
+    def riga(c):
+        price = f"€{c['price']}" if c["price"] else "€?"
+        ver = "descr. OK" if c.get("verificato") else "⚠️ descr. NON letta"
+        addr = c["addr"][:35] or "(zona non in card)"
+        return (f"- {c['title'][:60]} | {price} | {addr} | "
+                f"[{c.get('fonte_tipo','?')}] [{ver}]\n  {c['link']}")
+
+    fonti_riepilogo = " · ".join(f"{nome}:{n}" for nome, n, _ in fonti_stat)
     out_lines = [f"# Annunci affitto Roma centro — {date.today()}",
-                 f"# Nuovi in target: {len(nuovi)} (favorevoli {len(favorevoli)}, neutri {len(neutri)})",
-                 "# Tag: [privato/agenzia/?] + stato verifica descrizione.\n"]
-    for sezione, lst in [("FAVOREVOLI (uso ricettivo ok)", favorevoli), ("NEUTRI (da verificare)", neutri)]:
-        out_lines.append(f"\n## {sezione}")
-        for c in lst:
-            price = f"€{c['price']}" if c["price"] else "€?"
-            ver = "descrizione OK" if c.get("verificato") else "⚠️ descrizione NON verificata (apri il link)"
-            out_lines.append(f"- {c['title'][:60]} | {price} | {c['addr'][:35]} | [{c.get('fonte_tipo','?')}] [{ver}]\n  {c['link']}")
+                 f"# Filtro: primi 10 rioni + Trastevere · ≤ €{MAX_PREZZO} · appartamenti",
+                 f"# Card raccolte: {tot} ({fonti_riepilogo}) · nuovi tenuti: {len(nuovi)}",
+                 ""]
+    note_fonti = [f"{nome} ({nota})" for nome, n, nota in fonti_stat if nota != "ok"]
+    if note_fonti:
+        out_lines.append("⚠️ FONTI CON PROBLEMI: " + "; ".join(note_fonti) + "\n")
+
+    if not nuovi:
+        out_lines.append("Nessun annuncio NUOVO in target oggi.")
+        if tot == 0:
+            out_lines.append("⚠️ Attenzione: 0 card raccolte da TUTTE le fonti — "
+                             "probabile blocco/cambio sito. Controllare lo scraper.")
+    else:
+        for sezione, lst in [("FAVOREVOLI (uso ricettivo ok)", fav),
+                             ("NEUTRI (da verificare descrizione)", neu)]:
+            if not lst:
+                continue
+            out_lines.append(f"\n## {sezione}")
+            out_lines.extend(riga(c) for c in lst)
+
     outfile = BASE / f"annunci_{date.today()}.txt"
     outfile.write_text("\n".join(out_lines), encoding="utf-8")
     log(f"\nDigest scritto in: {outfile.name}")
 
-    # invio email (solo se ci sono annunci nuovi)
-    if nuovi:
-        send_email(f"Annunci casa Roma centro — {date.today()} ({len(nuovi)} nuovi)",
-                   "\n".join(out_lines))
+    # invio email SEMPRE (anche 0 nuovi: serve come 'battito' + monitoraggio blocchi)
+    n = len(nuovi)
+    if n:
+        subj = f"🏠 Annunci Roma centro — {date.today()} ({n} nuovi)"
+    elif tot == 0:
+        subj = f"⚠️ Annunci Roma centro — {date.today()} (0 card: scraper da controllare)"
     else:
-        log("Nessun nuovo annuncio: niente email.")
+        subj = f"Annunci Roma centro — {date.today()} (nessun nuovo)"
+    send_email(subj, "\n".join(out_lines))
 
-    # aggiorna seen con TUTTI i candidati in target (anche gli scartati per rifiuto in
-    # descrizione, cosi' non li riapriamo/rinviamo)
+    # aggiorna seen con TUTTI i candidati (anche scartati a valle), per non riaprirli
     seen.update(c["key"] for c in cand)
     save_seen(seen)
 
