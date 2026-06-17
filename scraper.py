@@ -2,9 +2,10 @@
 Scraper Via C — annunci affitto Roma centro dagli aggregatori (Nuroa/Trovit/Casa.it).
 NON filtra agenzia/privato. Filtra:
   - tipo: appartamenti (esclude negozi, uffici, box, garage, stanze...)
-  - zona: PRIMI 10 RIONI (R.I–R.X) + TRASTEVERE. Esclusi Prati/Vaticano, Esquilino,
-    Celio, Aventino, Testaccio e periferia. Classificazione a 3 esiti (in/fuori/forse);
-    i "forse" entrano solo se il DETTAGLIO conferma il target (rione/landmark/CAP).
+  - zona: primi 10 rioni (R.I–R.X) + Trastevere + Esquilino, Celio, Colle Oppio,
+    Aventino, Testaccio. Esclusi Prati/Vaticano/Borgo, San Lorenzo, San Giovanni e
+    periferia. Classificazione a 3 esiti (in/fuori/forse); i "forse" entrano solo se
+    il DETTAGLIO conferma il target (rione/landmark/CAP).
   - prezzo: <= MAX_PREZZO
   - uso ricettivo: SCARTA chi lo rifiuta (no affitti brevi / solo uso abitativo...)
     e mette in cima chi lo favorisce (uso transitorio, foresteria, investimento...)
@@ -34,9 +35,9 @@ BASE = Path(__file__).resolve().parent
 MAX_PREZZO = 1800
 
 # ----------------------------- ZONA --------------------------------------- #
-# Target = i PRIMI 10 RIONI di Roma (R.I–R.X) + TRASTEVERE (R.XIII).
-# NON inclusi (richiesta Christian 16/06): Prati/Vaticano/Borgo, Esquilino,
-# Celio, Colle Oppio, Aventino, Testaccio, e tutta la periferia.
+# Target = PRIMI 10 RIONI di Roma (R.I–R.X) + TRASTEVERE (R.XIII) + Esquilino,
+# Celio, Colle Oppio, Aventino, Testaccio (rimessi su richiesta Christian 17/06).
+# NON inclusi: Prati/Vaticano/Borgo, San Lorenzo, San Giovanni, e tutta la periferia.
 #
 # Strategia: la card spesso non nomina il rione (solo "Roma" o una via). Quindi
 # classifichiamo con tre esiti — "in" (zona target sicura), "fuori" (zona esclusa
@@ -48,7 +49,8 @@ ZONE_TARGET = re.compile(
     r"\bcentro\s+storico\b|"
     # rioni
     r"\b(trastevere|campo\s+marzio|sant'?\s?eustachio|s\.?\s?eustachio|"
-    r"campitelli|parione|regola|pigna|colonna|trevi)\b|"
+    r"campitelli|parione|regola|pigna|colonna|trevi|"
+    r"esquilino|celio|colle\s+oppio|aventino|testaccio)\b|"
     r"\brione\s+monti\b|\bmonti\b(?!\s*(tiburtin|sacro|parioli))|\bponte\b(?!\s*(mammolo|galeria|milvio))|"
     # landmark / vie / piazze centrali
     r"pantheon|piazza\s+navona|campo\s+de'?\s?fiori|fontana\s+di\s+trevi|"
@@ -62,7 +64,12 @@ ZONE_TARGET = re.compile(
     r"via\s+cavour|via\s+nazionale|via\s+panisperna|via\s+dei\s+serpenti|via\s+urbana|"
     r"via\s+del\s+tritone|via\s+due\s+macelli|via\s+del\s+plebiscito|via\s+delle\s+botteghe\s+oscure|"
     r"piazza\s+santa\s+maria\s+in\s+trastevere|viale\s+(di\s+)?trastevere|piazza\s+trilussa|"
-    r"via\s+della\s+lungaretta|via\s+di\s+san\s+francesco\s+a\s+ripa|ponte\s+sisto",
+    r"via\s+della\s+lungaretta|via\s+di\s+san\s+francesco\s+a\s+ripa|ponte\s+sisto|"
+    # Esquilino / Celio / Colle Oppio / Aventino / Testaccio (rimessi 17/06)
+    r"piazza\s+vittorio|santa\s+maria\s+maggiore|san\s+pietro\s+in\s+vincoli|"
+    r"via\s+merulana|via\s+labicana|colosseo|san\s+clemente|celimontana|"
+    r"terme\s+di\s+caracalla|circo\s+massimo|giardino\s+degli\s+aranci|"
+    r"piramide|monte\s+testaccio|mercato\s+(di\s+)?testaccio",
     re.I)
 
 # --- CAP centrali (rete di sicurezza, cercata nel dettaglio completo) ---
@@ -75,8 +82,7 @@ ZONE_EXCLUDE = re.compile(
     # Vaticano / Prati / Borgo (la segnalazione "lontana" del 16/06)
     r"\bprati\b|prati\s+degli\s+strozzi|vaticano|\bborgo\b|ottaviano|cipro|lepanto|"
     r"cola\s+di\s+rienzo|della\s+vittoria|delle\s+vittorie|piazza\s+delle\s+muse|"
-    # rioni/quartieri centrali ma esclusi dalla richiesta
-    r"esquilino|vittorio\s+emanuele|termini|celio|colle\s+oppio|aventino|testaccio|"
+    # quartieri adiacenti ma esclusi (Esquilino/Celio/Aventino/Testaccio sono TARGET)
     r"san\s+lorenzo|san\s+giovanni|s\.?\s?giovanni|appio|"
     # macrozone periferiche
     r"prati\s+fiscal|monte\s+sacro|monti\s+tiburtin|nuovo\s+salario|talenti|vigne\s+nuove|"
@@ -444,7 +450,7 @@ def main():
 
     fonti_riepilogo = " · ".join(f"{nome}:{n}" for nome, n, _ in fonti_stat)
     out_lines = [f"# Annunci affitto Roma centro — {date.today()}",
-                 f"# Filtro: primi 10 rioni + Trastevere · ≤ €{MAX_PREZZO} · appartamenti",
+                 f"# Filtro: 10 rioni + Trastevere + Esquilino/Celio/Aventino/Testaccio · ≤ €{MAX_PREZZO} · appartamenti",
                  f"# Card raccolte: {tot} ({fonti_riepilogo}) · nuovi tenuti: {len(nuovi)}",
                  ""]
     note_fonti = [f"{nome} ({nota})" for nome, n, nota in fonti_stat if nota != "ok"]
