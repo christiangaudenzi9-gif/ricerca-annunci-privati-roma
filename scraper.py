@@ -173,21 +173,63 @@ def email_cfg():
     return user, pwd, to
 
 
-def send_email(subject, body):
-    user, pwd, to = email_cfg()
-    if not (user and pwd):
-        log("Email non configurata (manca GMAIL_USER/GMAIL_PASS) -> salto invio.")
+def send_via_resend(to, subject, body):
+    """Invio via API HTTP Resend (NON bloccata dal cloud come lo SMTP).
+    Attivo solo se RESEND_API_KEY e' nell'env. From di default = mittente di
+    test Resend (per spedire senza dominio verificato registrati con la casella
+    destinataria). Ritorna True se accettata."""
+    key = os.environ.get("RESEND_API_KEY")
+    if not key:
         return False
-    msg = EmailMessage()
-    msg["From"] = user
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(user, pwd.replace(" ", ""))
-        s.send_message(msg)
-    log(f"Email inviata a {to}")
-    return True
+    sender = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
+    try:
+        r = requests.post("https://api.resend.com/emails",
+                          headers={"Authorization": f"Bearer {key}",
+                                   "Content-Type": "application/json"},
+                          json={"from": sender, "to": [to],
+                                "subject": subject, "text": body},
+                          timeout=25)
+        if r.status_code in (200, 201):
+            log(f"Email inviata via Resend a {to}")
+            return True
+        log(f"Resend ha rifiutato ({r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        log(f"Resend errore: {type(e).__name__}: {e}")
+    return False
+
+
+def send_via_smtp(user, pwd, to, subject, body):
+    """Invio via SMTP Gmail. Wrappato: non solleva mai, logga l'errore esatto
+    (cosi' un blocco del cloud sulla porta 465 NON fa morire tutto il run)."""
+    try:
+        msg = EmailMessage()
+        msg["From"] = user
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.set_content(body)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as s:
+            s.login(user, pwd.replace(" ", ""))
+            s.send_message(msg)
+        log(f"Email inviata via SMTP a {to}")
+        return True
+    except Exception as e:
+        log(f"SMTP FALLITO ({type(e).__name__}: {str(e)[:160]}) "
+            f"-> probabile blocco porta 465 nel cloud; serve RESEND_API_KEY.")
+        return False
+
+
+def send_email(subject, body):
+    """Prova Resend (HTTP, cloud-friendly), poi fallback SMTP. Non solleva mai."""
+    user, pwd, to = email_cfg()
+    if not to:
+        log("Nessun destinatario configurato -> salto invio.")
+        return False
+    if send_via_resend(to, subject, body):
+        return True
+    if user and pwd:
+        return send_via_smtp(user, pwd, to, subject, body)
+    log("Nessun canale di invio disponibile (manca RESEND_API_KEY e/o GMAIL_USER/PASS).")
+    return False
 
 
 def fetch(url):
