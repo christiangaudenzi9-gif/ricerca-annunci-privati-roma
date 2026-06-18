@@ -292,6 +292,57 @@ def parse_casa(html):
     return list(uniq.values())
 
 
+def parse_casadaprivato(html):
+    """CasaDaPrivato.it — bacheca di SOLI privati. Le card .item contengono gia'
+    'da Privato a Roma, Zona X, Via Y' nel testo (zona+indirizzo inline)."""
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for it in soup.select(".item"):
+        pr = it.select_one(".price")
+        a = it.find("a", href=True)
+        if not pr or not a:
+            continue
+        href = a["href"]
+        link = href if href.startswith("http") else "https://www.casadaprivato.it" + href
+        pm = re.search(r"(\d[\d.]*)", pr.get_text(" ", strip=True))
+        price = int(pm.group(1).replace(".", "")) if pm else None
+        txt = it.get_text(" ", strip=True)
+        m = re.search(r"-(\d+)/?$", href)
+        key = "priv-" + m.group(1) if m else re.sub(r"\W+", "", txt[:40])
+        out.append({"key": key, "title": txt[:80], "price": price,
+                    "addr": "", "desc": txt[:300], "link": link})
+    uniq = {d["key"]: d for d in out}
+    return list(uniq.values())
+
+
+def parse_clickcase(html):
+    """ClickCase.it — portale di SOLI privati. Card senza markup stabile: si
+    parte dall'ancora dell'annuncio (-roma-<id>.html) e si risale al prezzo."""
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if not re.search(r"-roma-\d+\.html", href):
+            continue
+        link = href if href.startswith("http") else "https://www.clickcase.it" + href
+        title = a.get_text(" ", strip=True)
+        price, node = None, a
+        for _ in range(6):
+            node = node.parent
+            if node is None:
+                break
+            pm = re.search(r"(\d[\d.]{2,})\s*(?:€|euro)|€\s*(\d[\d.]{2,})",
+                           node.get_text(" ", strip=True), re.I)
+            if pm:
+                price = int((pm.group(1) or pm.group(2)).replace(".", "")); break
+        m = re.search(r"-(\d+)\.html", href)
+        key = "priv-" + m.group(1) if m else re.sub(r"\W+", "", (title + str(price)))[:40]
+        out.append({"key": key, "title": title, "price": price,
+                    "addr": "", "desc": title, "link": link})
+    uniq = {d["key"]: d for d in out}
+    return list(uniq.values())
+
+
 def tipo_ok(title):
     t = title.lower()
     if any(x in t for x in TIPI_NO):
@@ -362,6 +413,17 @@ def main():
          "url": "https://www.casa.it/affitto/residenziale/roma/",
          "parser": parse_casa, "pages": 6,
          "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
+        # --- bacheche di SOLI privati (gratis, no anti-bot). Subito/Idealista/
+        # Immobiliare restano a Christian via app (Akamai → servirebbe ScraperAPI).
+        {"name": "casadaprivato",
+         "url": "https://www.casadaprivato.it/annunci-affitto/immobili/roma-roma/",
+         "parser": parse_casadaprivato, "pages": 1,
+         "pagefmt": lambda u, p: u if p == 1 else f"{u}?pag={p}", "solo_privati": True},
+        {"name": "clickcase",
+         "url": "https://www.clickcase.it/annunci/case-in-affitto-privati-roma.html",
+         "parser": parse_clickcase, "pages": 1,
+         "pagefmt": lambda u, p: u if p == 1 else u.replace(".html", f"-{p}.html"),
+         "solo_privati": True},
     ]
     raw = []
     fonti_stat = []   # (nome, n_card, nota) per il report/email — rende visibile un blocco
@@ -377,6 +439,8 @@ def main():
                 nota = f"errore {type(e).__name__} a pag {p}"
                 break
             cards = s["parser"](html)
+            for c in cards:                     # portali di soli privati: marca la fonte
+                c["solo_privati"] = s.get("solo_privati", False)
             log(f"  {url} -> {len(cards)} card")
             if not cards:
                 if p == 1:
@@ -434,7 +498,7 @@ def main():
         else:
             c["classe"] = "neutro"
         c["tel"] = estrai_tel(full)
-        c["fonte_tipo"] = private_signal(detail)
+        c["fonte_tipo"] = "privato" if c.get("solo_privati") else private_signal(detail)
         c["verificato"] = detail is not None
         if not detail:
             non_verif += 1
