@@ -113,6 +113,20 @@ FAVORE = re.compile(
     r"casa vacanz|b\s?&\s?b|investiment|a reddito|\breddito\b|uso ricettiv|"
     r"ideale per investiment|rendita|turistic|airbnb", re.I)
 
+# telefono (cellulare 3xx o fisso 06...) — per contattare subito l'inserzionista
+TEL_RE = re.compile(r"(?<!\d)(?:\+39[\s.]?)?(?:3\d{2}[\s.\-]?\d{6,7}|0\d{1,3}[\s.\-]?\d{5,8})(?!\d)")
+
+
+def estrai_tel(text):
+    """Primo numero di telefono plausibile dal testo dell'annuncio (None se assente)."""
+    if not text:
+        return None
+    for m in TEL_RE.findall(text):
+        num = re.sub(r"[^\d+]", "", m)
+        if 9 <= len(num.lstrip("+")) <= 13:
+            return m.strip()
+    return None
+
 SEEN_FILE = BASE / "seen.json"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -338,15 +352,15 @@ def main():
     SOURCES = [
         {"name": "nuroa",
          "url": "https://www.nuroa.it/affitto-appartamenti-roma",
-         "parser": parse_nuroa, "pages": 15,
+         "parser": parse_nuroa, "pages": 20,
          "pagefmt": lambda u, p: u if p == 1 else f"{u}/{p}"},
         {"name": "trovit",
          "url": "https://casa.trovit.it/affitto-roma",
-         "parser": parse_trovit, "pages": 3,  # TODO verificare param paginazione
+         "parser": parse_trovit, "pages": 5,
          "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
         {"name": "casa.it",
          "url": "https://www.casa.it/affitto/residenziale/roma/",
-         "parser": parse_casa, "pages": 4,
+         "parser": parse_casa, "pages": 6,
          "pagefmt": lambda u, p: u if p == 1 else f"{u}?page={p}"},
     ]
     raw = []
@@ -377,8 +391,10 @@ def main():
     allcards = list({c["key"]: c for c in raw}.values())
 
     tot = len(allcards)
-    # filtro card: tipo -> prezzo -> zona (3 esiti) -> rifiuto gia' nella card
-    cand, scartati_tipo, scartati_zona, scartati_prezzo, scartati_rifiuto = [], 0, 0, 0, 0
+    # filtro card: tipo -> prezzo -> zona (3 esiti). NB: gli annunci "no uso
+    # ricettivo" NON si scartano piu' (sono i lead da convincere con l'offerta);
+    # si taggano soltanto.
+    cand, scartati_tipo, scartati_zona, scartati_prezzo = [], 0, 0, 0
     for c in allcards:
         if not tipo_ok(c["title"]):
             scartati_tipo += 1; continue
@@ -387,8 +403,7 @@ def main():
         z = zona_classifica(" ".join([c["addr"], c["title"], c["desc"]]))
         if z == "fuori":
             scartati_zona += 1; continue
-        if RIFIUTO.search(" ".join([c["title"], c["addr"], c["desc"]])):
-            scartati_rifiuto += 1; continue
+        c["rifiuto_card"] = bool(RIFIUTO.search(" ".join([c["title"], c["addr"], c["desc"]])))
         c["zona_card"] = z   # "in" o "forse"
         cand.append(c)
 
@@ -396,13 +411,10 @@ def main():
     # legge il testo, ri-classifica la zona (CAP/indirizzo completo), scarta chi
     # rifiuta l'uso ricettivo o e' fuori target, tagga privato/agenzia.
     nuovi_cand = [c for c in cand if c["key"] not in seen]
-    keep, scartati_rifiuto_desc, scartati_zona_desc, non_verif = [], 0, 0, 0
+    keep, da_convincere_n, scartati_zona_desc, non_verif = [], 0, 0, 0
     for c in nuovi_cand:
         detail = fetch_detail(c["link"])
         full = " ".join([c["title"], c["addr"], c["desc"], detail or ""])
-        if detail and RIFIUTO.search(full):
-            scartati_rifiuto_desc += 1
-            continue   # rifiuta l'uso ricettivo -> fuori
         # zona: card "in" basta; card "forse" entra SOLO se il dettaglio CONFERMA
         # il target (rione/landmark/CAP). Conferma solo positiva: niente esclusioni
         # sul dettaglio (evita falsi scarti tipo "a 5 min da Termini") e niente
@@ -412,7 +424,16 @@ def main():
                 scartati_zona_desc += 1
                 continue
         c["zona_finale"] = "in"
-        c["classe"] = "favorevole" if FAVORE.search(full) else "neutro"
+        # classe: favorevole (cerca uso ricettivo) > da_convincere (lo rifiuta:
+        # e' il lead da girare con l'offerta) > neutro (non si pronuncia).
+        rifiuta = c.get("rifiuto_card") or bool(detail and RIFIUTO.search(full))
+        if FAVORE.search(full):
+            c["classe"] = "favorevole"
+        elif rifiuta:
+            c["classe"] = "da_convincere"; da_convincere_n += 1
+        else:
+            c["classe"] = "neutro"
+        c["tel"] = estrai_tel(full)
         c["fonte_tipo"] = private_signal(detail)
         c["verificato"] = detail is not None
         if not detail:
@@ -420,11 +441,14 @@ def main():
         keep.append(c)
         time.sleep(0.6)
 
-    # ordina: favorevoli prima, poi i piu' "privati"
-    keep.sort(key=lambda c: (0 if c["classe"] == "favorevole" else 1,
+    # ordina: favorevoli > da convincere > neutri; a parita', con telefono e privati prima
+    _rank = {"favorevole": 0, "da_convincere": 1, "neutro": 2}
+    keep.sort(key=lambda c: (_rank[c["classe"]],
+                             0 if c.get("tel") else 1,
                              0 if c["fonte_tipo"].startswith("privato") else 1))
     nuovi = keep   # tutti zona_finale == "in": primi 10 rioni + Trastevere
     fav = [c for c in nuovi if c["classe"] == "favorevole"]
+    conv = [c for c in nuovi if c["classe"] == "da_convincere"]
     neu = [c for c in nuovi if c["classe"] == "neutro"]
 
     # report a schermo
@@ -436,16 +460,17 @@ def main():
     log(f"  scartati prezzo (> {MAX_PREZZO}): {scartati_prezzo}")
     log(f"  scartati zona card (fuori target): {scartati_zona}")
     log(f"  scartati zona da dettaglio: {scartati_zona_desc}")
-    log(f"  scartati rifiuto ricettivo: {scartati_rifiuto + scartati_rifiuto_desc}")
     log(f"  candidati: {len(cand)} (nuovi verificati: {len(nuovi_cand)})")
-    log(f"  TENUTI (centro confermato): {len(nuovi)} (fav {len(fav)}, neu {len(neu)})")
+    log(f"  TENUTI (centro confermato): {len(nuovi)} "
+        f"(fav {len(fav)}, da convincere {len(conv)}, neu {len(neu)})")
 
     # --- costruzione corpo email/digest (SEMPRE, anche con 0 nuovi) ---
     def riga(c):
         price = f"€{c['price']}" if c["price"] else "€?"
         ver = "descr. OK" if c.get("verificato") else "⚠️ descr. NON letta"
         addr = c["addr"][:35] or "(zona non in card)"
-        return (f"- {c['title'][:60]} | {price} | {addr} | "
+        tel = f"📞 {c['tel']} | " if c.get("tel") else ""
+        return (f"- {tel}{c['title'][:60]} | {price} | {addr} | "
                 f"[{c.get('fonte_tipo','?')}] [{ver}]\n  {c['link']}")
 
     fonti_riepilogo = " · ".join(f"{nome}:{n}" for nome, n, _ in fonti_stat)
@@ -463,8 +488,9 @@ def main():
             out_lines.append("⚠️ Attenzione: 0 card raccolte da TUTTE le fonti — "
                              "probabile blocco/cambio sito. Controllare lo scraper.")
     else:
-        for sezione, lst in [("FAVOREVOLI (uso ricettivo ok)", fav),
-                             ("NEUTRI (da verificare descrizione)", neu)]:
+        for sezione, lst in [("🎯 FAVOREVOLI (cercano uso ricettivo)", fav),
+                             ("🔥 DA CONVINCERE (dicono no brevi → tuo target)", conv),
+                             ("NEUTRI (non si pronunciano)", neu)]:
             if not lst:
                 continue
             out_lines.append(f"\n## {sezione}")
